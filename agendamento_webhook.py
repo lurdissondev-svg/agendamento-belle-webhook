@@ -25,7 +25,9 @@ app = FastAPI(
 )
 
 # URLs
-BELLE_WEBHOOK_URL = "http://187.60.56.72:25256"
+BELLE_BASE_URL = "https://app.bellesoftware.com.br"
+BELLE_API_PATH = "/api/release/controller/IntegracaoExterna/v1.0"
+BELLE_TOKEN = "f236029cecd084712f7b3ce12c3e0c14"
 BITRIX_WEBHOOK_URL = "https://crepaldi.bitrix24.com.br/rest/126490/7ckld4dli6jds9b2"
 
 # Campos do Lead no Bitrix
@@ -107,13 +109,20 @@ def bitrix_call(method: str, params: dict | None = None) -> dict[str, Any]:
 
 def belle_call(endpoint: str, payload: dict) -> dict[str, Any]:
     """Faz chamada à API da Belle Software."""
-    url = f"{BELLE_WEBHOOK_URL}{endpoint}"
+    url = f"{BELLE_BASE_URL}{BELLE_API_PATH}{endpoint}"
+    headers = {
+        "Authorization": BELLE_TOKEN,
+        "Content-Type": "application/json",
+    }
     try:
-        response = httpx.post(url, json=payload, timeout=30.0)
+        logger.info("belle_api_request", url=url, payload=payload)
+        response = httpx.post(url, json=payload, headers=headers, timeout=30.0)
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        logger.info("belle_api_response", response=result)
+        return result
     except httpx.HTTPError as e:
-        logger.error("belle_api_error", endpoint=endpoint, error=str(e))
+        logger.error("belle_api_error", endpoint=endpoint, error=str(e), response_text=getattr(e.response, 'text', None) if hasattr(e, 'response') else None)
         raise
 
 
@@ -291,29 +300,39 @@ async def processar_agendamento_json(request: Request, dados: AgendamentoRequest
                 f"AVISO: {aviso_estabelecimento}"
             )
 
-        # 2. Prepara payload para Belle Software
+        # 2. Prepara payload para Belle Software (formato oficial da API)
         servicos_lista = [s.strip() for s in dados.servicos.split(",") if s.strip()]
 
+        # Monta array de serviços no formato da API Belle
+        serv_array = []
+        for servico in servicos_lista:
+            serv_array.append({
+                "codServico": servico,
+                "nomeServico": servico,
+            })
+
+        # Payload no formato oficial da API Belle
         belle_payload = {
-            "codCliente": dados.codigo_cliente_belle,
-            "nomeCliente": dados.lead_nome,
-            "telefoneCliente": dados.lead_telefone,
-            "dataAgendamento": dados.data_agendamento,
-            "horaAgendamento": dados.horario,
-            "codEstabelecimento": dados.estabelecimento_codigo,
-            "codProfissional": dados.profissional_codigo,
-            "tipoAgendamento": dados.tipo_agendamento,
-            "servicos": servicos_lista,
-            "tempo": dados.tempo,
+            "codCli": int(dados.codigo_cliente_belle) if dados.codigo_cliente_belle else None,
+            "codEstab": dados.estabelecimento_codigo,
+            "prof": {
+                "cod_usuario": str(dados.profissional_codigo),
+                "nom_usuario": dados.profissional_nome or "",
+            },
+            "dtAgd": dados.data_agendamento,
+            "hri": dados.horario,
+            "serv": serv_array,
+            "codPlano": "",
+            "agSala": False,
+            "codSala": 0,
+            "codVendedor": "",
             "codEquipamento": dados.equipamento_codigo,
-            "novoCard": dados.novo_card,
-            "observacao": dados.observacao,
-            "leadId": dados.lead_id,
+            "obs": dados.observacao,
         }
 
         # 3. Envia para Belle Software
         logger.info("enviando_para_belle", lead_id=dados.lead_id)
-        belle_response = belle_call("/agendar", belle_payload)
+        belle_response = belle_call("/agenda/gravar", belle_payload)
 
         codigo_agendamento = belle_response.get("codAgendamento") or belle_response.get("codigo_agendamento")
 
@@ -487,29 +506,41 @@ async def processar_agendamento_get(
             warning = aviso_estabelecimento
             adicionar_comentario_lead(lead_id, f"AVISO: {aviso_estabelecimento}")
 
-        # 3. Prepara payload para Belle Software
+        # 3. Prepara payload para Belle Software (formato oficial da API)
+        # Converte lista de serviços para o formato esperado pela API
         servicos_lista = [s.strip() for s in procedimento.split(",") if s.strip()]
 
+        # Monta array de serviços no formato da API Belle
+        # Cada serviço deve ter: codServico, nomeServico, tempo, etc.
+        serv_array = []
+        for servico in servicos_lista:
+            serv_array.append({
+                "codServico": servico,
+                "nomeServico": servico,
+            })
+
+        # Payload no formato oficial da API Belle
         belle_payload = {
-            "codCliente": None,
-            "nomeCliente": lead_nome,
-            "telefoneCliente": lead_telefone,
-            "dataAgendamento": dataagendamento,
-            "horaAgendamento": horario,
-            "codEstabelecimento": estab_belle,  # Usa código Belle convertido
-            "codProfissional": int(profissional) if profissional else 0,
-            "tipoAgendamento": tipoagenda,
-            "servicos": servicos_lista,
-            "tempo": 15,
-            "codEquipamento": int(equipamento) if equipamento else None,
-            "novoCard": False,
-            "observacao": obs or "",
-            "leadId": lead_id,
+            "codCli": None,  # Código do cliente (será criado se não existir)
+            "codEstab": estab_belle,  # Código do estabelecimento
+            "prof": {
+                "cod_usuario": str(profissional) if profissional else "",
+                "nom_usuario": "",
+            },
+            "dtAgd": dataagendamento,  # Data no formato dd/mm/yyyy
+            "hri": horario,  # Horário no formato HH:MM
+            "serv": serv_array,  # Array de serviços
+            "codPlano": "",  # Código do plano (opcional)
+            "agSala": False,  # Flag de agendamento para sala
+            "codSala": 0,  # Código da sala
+            "codVendedor": "",  # Código do vendedor (opcional)
+            "codEquipamento": int(equipamento) if equipamento else None,  # Código do equipamento (opcional)
+            "obs": obs or "",  # Observação
         }
 
-        # 3. Envia para Belle Software
+        # 4. Envia para Belle Software
         logger.info("enviando_para_belle", lead_id=lead_id, payload=belle_payload)
-        belle_response = belle_call("/agendar", belle_payload)
+        belle_response = belle_call("/agenda/gravar", belle_payload)
 
         codigo_agendamento = belle_response.get("codAgendamento") or belle_response.get("codigo_agendamento") or "N/A"
 
