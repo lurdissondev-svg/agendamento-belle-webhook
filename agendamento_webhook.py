@@ -192,20 +192,34 @@ def criar_agendamento_belle(
 ) -> dict[str, Any]:
     """
     Cria um agendamento de serviço na Belle Software.
+    Usa o formato documentado na API da Belle.
     """
+    # Monta array de serviços no formato da API Belle
+    serv_array = []
+    if codServico:
+        serv_array.append({
+            "codServico": str(codServico),
+            "nomeServico": str(codServico),
+        })
+
+    # Payload no formato oficial da API Belle (Postman)
     payload = {
-        "codCliente": codCliente,
-        "codServico": int(codServico) if codServico else None,
-        "codEstab": codEstab,
-        "data": data,  # formato dd/mm/yyyy
-        "hora": hora,  # formato HH:MM
+        "codCli": codCliente,  # Código do cliente
+        "codEstab": codEstab,  # Código do estabelecimento
+        "prof": {
+            "cod_usuario": str(codProfissional) if codProfissional else "",
+            "nom_usuario": "",
+        },
+        "dtAgd": data,  # Data no formato dd/mm/yyyy
+        "hri": hora,  # Horário no formato HH:MM
+        "serv": serv_array,  # Array de serviços
+        "codPlano": "",
+        "agSala": False,
+        "codSala": 0,
+        "codVendedor": "",
+        "codEquipamento": None,
+        "obs": observacao or "",
     }
-
-    if codProfissional:
-        payload["codProfissional"] = int(codProfissional) if codProfissional.isdigit() else codProfissional
-
-    if observacao:
-        payload["observacao"] = observacao
 
     logger.info("criando_agendamento_belle", payload=payload)
     # Endpoint documentado da API Belle para gravar agenda
@@ -592,10 +606,9 @@ async def processar_agendamento_get(
             warning = aviso_estabelecimento
             adicionar_comentario_lead(lead_id, f"AVISO: {aviso_estabelecimento}")
 
-        # 3. NOVO FLUXO: Criar cliente na Belle primeiro
+        # 3. Busca código Belle existente no lead (se houver)
         codigo_cliente_belle = None
 
-        # Busca dados do lead no Bitrix para obter código Belle existente
         try:
             lead_data = bitrix_call("crm.lead.get", {"id": lead_id})
             if lead_data and lead_data.get("result"):
@@ -606,35 +619,8 @@ async def processar_agendamento_get(
         except Exception as e:
             logger.warning("erro_buscar_lead", lead_id=lead_id, error=str(e))
 
-        # Se não tem código Belle, cria o cliente
-        if not codigo_cliente_belle:
-            logger.info("criando_cliente_belle", lead_id=lead_id, nome=lead_nome, telefone=lead_telefone)
-
-            try:
-                cliente_response = criar_cliente_belle(
-                    nome=lead_nome or f"Lead {lead_id}",
-                    telefone=lead_telefone or "",
-                    codEstab=estab_belle
-                )
-
-                # Extrai código do cliente da resposta
-                codigo_cliente_belle = (
-                    cliente_response.get("codCliente") or
-                    cliente_response.get("codigo") or
-                    cliente_response.get("cod_cliente") or
-                    cliente_response.get("id")
-                )
-
-                if codigo_cliente_belle:
-                    logger.info("cliente_belle_criado", lead_id=lead_id, codigo_belle=codigo_cliente_belle)
-
-                    # Salva código Belle no lead do Bitrix
-                    atualizar_lead(lead_id, {FIELD_CODIGO_CLIENTE_BELLE: str(codigo_cliente_belle)})
-                    logger.info("codigo_belle_salvo_lead", lead_id=lead_id, codigo_belle=codigo_cliente_belle)
-
-            except Exception as e:
-                logger.error("erro_criar_cliente_belle", lead_id=lead_id, error=str(e))
-                # Continua sem código de cliente, a Belle pode criar automaticamente
+        # NOTA: Criação de cliente na Belle exige CPF, então vamos direto para agendamento
+        # A Belle pode criar o cliente automaticamente durante o agendamento
 
         # 4. Cria o agendamento na Belle
         servicos_lista = [s.strip() for s in procedimento.split(",") if s.strip()]
