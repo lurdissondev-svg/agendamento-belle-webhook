@@ -188,18 +188,23 @@ def criar_agendamento_belle(
     data: str,
     hora: str,
     codProfissional: str = None,
-    observacao: str = None
+    observacao: str = None,
+    tempo: int = 30
 ) -> dict[str, Any]:
     """
     Cria um agendamento de serviço na Belle Software.
     Usa o formato documentado na API da Belle.
+
+    IMPORTANTE: O campo 'tempo' DEVE ir dentro de cada serviço no array serv.
     """
     # Monta array de serviços no formato da API Belle
+    # O campo tempo é OBRIGATÓRIO dentro de cada serviço
     serv_array = []
     if codServico:
         serv_array.append({
             "codServico": str(codServico),
             "nomeServico": str(codServico),
+            "tempo": tempo,  # OBRIGATÓRIO - duração em minutos
         })
 
     # Payload no formato oficial da API Belle (Postman)
@@ -404,11 +409,13 @@ async def processar_agendamento_json(request: Request, dados: AgendamentoRequest
         servicos_lista = [s.strip() for s in dados.servicos.split(",") if s.strip()]
 
         # Monta array de serviços no formato da API Belle
+        # IMPORTANTE: O campo tempo é OBRIGATÓRIO dentro de cada serviço
         serv_array = []
         for servico in servicos_lista:
             serv_array.append({
                 "codServico": servico,
                 "nomeServico": servico,
+                "tempo": dados.tempo,  # OBRIGATÓRIO - duração em minutos
             })
 
         # Payload no formato oficial da API Belle
@@ -432,7 +439,7 @@ async def processar_agendamento_json(request: Request, dados: AgendamentoRequest
 
         # 3. Envia para Belle Software
         logger.info("enviando_para_belle", lead_id=dados.lead_id)
-        belle_response = belle_call("/agenda/gravar", belle_payload)
+        belle_response = belle_call("/api/release/controller/IntegracaoExterna/v1.0/agenda/gravar", belle_payload)
 
         codigo_agendamento = belle_response.get("codAgendamento") or belle_response.get("codigo_agendamento")
 
@@ -537,6 +544,7 @@ async def processar_agendamento_get(
     equipamento: str = Query(None, description="Codigo do equipamento"),
     obs: str = Query("", description="Observacao"),
     responsavel: str = Query(None, description="Responsavel"),
+    tempo: int = Query(30, description="Duracao em minutos"),
 ):
     """
     Processa agendamento via query parameters (GET/POST).
@@ -636,7 +644,8 @@ async def processar_agendamento_get(
                 data=dataagendamento,
                 hora=horario,
                 codProfissional=profissional,
-                observacao=obs
+                observacao=obs,
+                tempo=tempo
             )
 
             codigo_agendamento = (
@@ -832,12 +841,15 @@ async def agendamentos_add_legacy(
         )
 
         # Monta array de serviços
+        # IMPORTANTE: O campo tempo é OBRIGATÓRIO dentro de cada serviço
+        tempo_minutos = int(tempo) if tempo and tempo.isdigit() else 30
         serv_array = []
         for serv in servicos:
             if serv:
                 serv_array.append({
                     "codServico": str(serv),
                     "nomeServico": str(serv),
+                    "tempo": tempo_minutos,  # OBRIGATÓRIO - duração em minutos
                 })
 
         # Payload no formato da API Belle
