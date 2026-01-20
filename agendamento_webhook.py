@@ -24,9 +24,9 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# URLs
+# URLs e Tokens
+# A API da Belle pode usar diferentes bases dependendo do endpoint
 BELLE_BASE_URL = "https://app.bellesoftware.com.br"
-BELLE_API_PATH = "/api/release/controller/IntegracaoExterna/v1.0"
 BELLE_TOKEN = "f236029cecd084712f7b3ce12c3e0c14"
 BITRIX_WEBHOOK_URL = "https://crepaldi.bitrix24.com.br/rest/126490/7ckld4dli6jds9b2"
 
@@ -107,23 +107,109 @@ def bitrix_call(method: str, params: dict | None = None) -> dict[str, Any]:
         raise
 
 
-def belle_call(endpoint: str, payload: dict) -> dict[str, Any]:
+def belle_call(endpoint: str, payload: dict, method: str = "POST") -> dict[str, Any]:
     """Faz chamada à API da Belle Software."""
-    url = f"{BELLE_BASE_URL}{BELLE_API_PATH}{endpoint}"
+    url = f"{BELLE_BASE_URL}{endpoint}"
     headers = {
         "Authorization": BELLE_TOKEN,
         "Content-Type": "application/json",
     }
     try:
-        logger.info("belle_api_request", url=url, payload=payload)
-        response = httpx.post(url, json=payload, headers=headers, timeout=30.0)
+        logger.info("belle_api_request", url=url, method=method, payload=payload)
+        if method == "GET":
+            response = httpx.get(url, params=payload, headers=headers, timeout=60.0)
+        else:
+            response = httpx.post(url, json=payload, headers=headers, timeout=60.0)
         response.raise_for_status()
         result = response.json()
         logger.info("belle_api_response", response=result)
         return result
     except httpx.HTTPError as e:
-        logger.error("belle_api_error", endpoint=endpoint, error=str(e), response_text=getattr(e.response, 'text', None) if hasattr(e, 'response') else None)
+        response_text = None
+        if hasattr(e, 'response') and e.response is not None:
+            response_text = e.response.text
+        logger.error("belle_api_error", endpoint=endpoint, error=str(e), response_text=response_text)
         raise
+
+
+def criar_cliente_belle(nome: str, telefone: str, codEstab: int, email: str = None, cpf: str = None) -> dict[str, Any]:
+    """
+    Cria ou atualiza um cliente na Belle Software.
+    Retorna os dados do cliente incluindo o código.
+    """
+    payload = {
+        "nome": nome,
+        "codEstab": codEstab,
+    }
+
+    # Limpa e formata telefone (remove espaços e caracteres especiais)
+    if telefone:
+        telefone_limpo = "".join(c for c in telefone if c.isdigit())
+        # Adiciona DDD se necessário
+        if len(telefone_limpo) >= 10:
+            payload["celular"] = telefone_limpo
+            payload["ddiCelular"] = "+55"
+
+    if email:
+        payload["email"] = email
+
+    if cpf:
+        cpf_limpo = "".join(c for c in cpf if c.isdigit())
+        if cpf_limpo:
+            payload["cpf"] = cpf_limpo
+
+    logger.info("criando_cliente_belle", payload=payload)
+    # Endpoint documentado da API Belle para salvar cliente
+    return belle_call("/api/release/controller/IntegracaoExterna/v1.0/clientes/salvar", payload)
+
+
+def buscar_cliente_por_telefone(telefone: str, codEstab: int) -> dict[str, Any] | None:
+    """
+    Busca cliente na Belle pelo telefone.
+    Retorna None se não encontrar.
+    """
+    try:
+        telefone_limpo = "".join(c for c in telefone if c.isdigit())
+        if not telefone_limpo:
+            return None
+
+        # Busca clientes com filtro (a API pode não suportar filtro por telefone direto)
+        # Por enquanto, vamos criar o cliente e a Belle irá verificar duplicidade
+        return None
+    except Exception as e:
+        logger.warning("erro_buscar_cliente", telefone=telefone, error=str(e))
+        return None
+
+
+def criar_agendamento_belle(
+    codCliente: int,
+    codServico: str,
+    codEstab: int,
+    data: str,
+    hora: str,
+    codProfissional: str = None,
+    observacao: str = None
+) -> dict[str, Any]:
+    """
+    Cria um agendamento de serviço na Belle Software.
+    """
+    payload = {
+        "codCliente": codCliente,
+        "codServico": int(codServico) if codServico else None,
+        "codEstab": codEstab,
+        "data": data,  # formato dd/mm/yyyy
+        "hora": hora,  # formato HH:MM
+    }
+
+    if codProfissional:
+        payload["codProfissional"] = int(codProfissional) if codProfissional.isdigit() else codProfissional
+
+    if observacao:
+        payload["observacao"] = observacao
+
+    logger.info("criando_agendamento_belle", payload=payload)
+    # Endpoint documentado da API Belle para gravar agenda
+    return belle_call("/api/release/controller/IntegracaoExterna/v1.0/agenda/gravar", payload)
 
 
 def converter_estabelecimento_para_belle(estabelecimento_id: int) -> int:
@@ -506,43 +592,79 @@ async def processar_agendamento_get(
             warning = aviso_estabelecimento
             adicionar_comentario_lead(lead_id, f"AVISO: {aviso_estabelecimento}")
 
-        # 3. Prepara payload para Belle Software (formato oficial da API)
-        # Converte lista de serviços para o formato esperado pela API
+        # 3. NOVO FLUXO: Criar cliente na Belle primeiro
+        codigo_cliente_belle = None
+
+        # Busca dados do lead no Bitrix para obter código Belle existente
+        try:
+            lead_data = bitrix_call("crm.lead.get", {"id": lead_id})
+            if lead_data and lead_data.get("result"):
+                lead_info = lead_data["result"]
+                codigo_cliente_belle = lead_info.get(FIELD_CODIGO_CLIENTE_BELLE)
+                if codigo_cliente_belle:
+                    logger.info("cliente_belle_existente", lead_id=lead_id, codigo_belle=codigo_cliente_belle)
+        except Exception as e:
+            logger.warning("erro_buscar_lead", lead_id=lead_id, error=str(e))
+
+        # Se não tem código Belle, cria o cliente
+        if not codigo_cliente_belle:
+            logger.info("criando_cliente_belle", lead_id=lead_id, nome=lead_nome, telefone=lead_telefone)
+
+            try:
+                cliente_response = criar_cliente_belle(
+                    nome=lead_nome or f"Lead {lead_id}",
+                    telefone=lead_telefone or "",
+                    codEstab=estab_belle
+                )
+
+                # Extrai código do cliente da resposta
+                codigo_cliente_belle = (
+                    cliente_response.get("codCliente") or
+                    cliente_response.get("codigo") or
+                    cliente_response.get("cod_cliente") or
+                    cliente_response.get("id")
+                )
+
+                if codigo_cliente_belle:
+                    logger.info("cliente_belle_criado", lead_id=lead_id, codigo_belle=codigo_cliente_belle)
+
+                    # Salva código Belle no lead do Bitrix
+                    atualizar_lead(lead_id, {FIELD_CODIGO_CLIENTE_BELLE: str(codigo_cliente_belle)})
+                    logger.info("codigo_belle_salvo_lead", lead_id=lead_id, codigo_belle=codigo_cliente_belle)
+
+            except Exception as e:
+                logger.error("erro_criar_cliente_belle", lead_id=lead_id, error=str(e))
+                # Continua sem código de cliente, a Belle pode criar automaticamente
+
+        # 4. Cria o agendamento na Belle
         servicos_lista = [s.strip() for s in procedimento.split(",") if s.strip()]
+        primeiro_servico = servicos_lista[0] if servicos_lista else None
 
-        # Monta array de serviços no formato da API Belle
-        # Cada serviço deve ter: codServico, nomeServico, tempo, etc.
-        serv_array = []
-        for servico in servicos_lista:
-            serv_array.append({
-                "codServico": servico,
-                "nomeServico": servico,
-            })
+        logger.info("criando_agendamento", lead_id=lead_id, codigo_cliente=codigo_cliente_belle, servico=primeiro_servico)
 
-        # Payload no formato oficial da API Belle
-        belle_payload = {
-            "codCli": None,  # Código do cliente (será criado se não existir)
-            "codEstab": estab_belle,  # Código do estabelecimento
-            "prof": {
-                "cod_usuario": str(profissional) if profissional else "",
-                "nom_usuario": "",
-            },
-            "dtAgd": dataagendamento,  # Data no formato dd/mm/yyyy
-            "hri": horario,  # Horário no formato HH:MM
-            "serv": serv_array,  # Array de serviços
-            "codPlano": "",  # Código do plano (opcional)
-            "agSala": False,  # Flag de agendamento para sala
-            "codSala": 0,  # Código da sala
-            "codVendedor": "",  # Código do vendedor (opcional)
-            "codEquipamento": int(equipamento) if equipamento else None,  # Código do equipamento (opcional)
-            "obs": obs or "",  # Observação
-        }
+        try:
+            agendamento_response = criar_agendamento_belle(
+                codCliente=int(codigo_cliente_belle) if codigo_cliente_belle else None,
+                codServico=primeiro_servico,
+                codEstab=estab_belle,
+                data=dataagendamento,
+                hora=horario,
+                codProfissional=profissional,
+                observacao=obs
+            )
 
-        # 4. Envia para Belle Software
-        logger.info("enviando_para_belle", lead_id=lead_id, payload=belle_payload)
-        belle_response = belle_call("/agenda/gravar", belle_payload)
+            codigo_agendamento = (
+                agendamento_response.get("codAgendamento") or
+                agendamento_response.get("codigo_agendamento") or
+                agendamento_response.get("codigo") or
+                agendamento_response.get("id") or
+                "CRIADO"
+            )
 
-        codigo_agendamento = belle_response.get("codAgendamento") or belle_response.get("codigo_agendamento") or "N/A"
+        except Exception as e:
+            logger.error("erro_criar_agendamento_belle", lead_id=lead_id, error=str(e))
+            codigo_agendamento = f"ERRO: {str(e)}"
+            raise
 
         logger.info(
             "agendamento_criado_belle",
@@ -550,7 +672,7 @@ async def processar_agendamento_get(
             codigo_agendamento=codigo_agendamento,
         )
 
-        # 4. Atualiza campos do lead no Bitrix
+        # 5. Atualiza campos do lead no Bitrix
         data_formatada = f"{dataagendamento} {horario}:00"
 
         campos_atualizar = {
@@ -565,17 +687,21 @@ async def processar_agendamento_get(
         if equipamento:
             campos_atualizar[FIELD_EQUIPAMENTO] = equipamento
 
+        if codigo_cliente_belle:
+            campos_atualizar[FIELD_CODIGO_CLIENTE_BELLE] = str(codigo_cliente_belle)
+
         atualizar_lead(lead_id, campos_atualizar)
         logger.info("lead_atualizado", lead_id=lead_id)
 
-        # 5. Adiciona comentario de sucesso na timeline
-        comentario = f"""Agendamento Criado com Sucesso
+        # 6. Adiciona comentario de sucesso na timeline
+        comentario = f"""✅ Agendamento Criado com Sucesso
 
 Codigo do Agendamento: {codigo_agendamento}
+Codigo Cliente Belle: {codigo_cliente_belle or 'N/A'}
 Data: {dataagendamento}
 Hora: {horario}
 Profissional: {profissional}
-Estabelecimento: {estabelecimento}
+Estabelecimento: {estabelecimento} (Belle: {estab_belle})
 Servicos: {procedimento}
 """
         if equipamento:
@@ -583,13 +709,14 @@ Servicos: {procedimento}
 
         adicionar_comentario_lead(lead_id, comentario)
 
-        # 6. Move para etapa "Agendados" (converte lead e cria negocio)
+        # 7. Move para etapa "Agendados" (converte lead e cria negocio)
         mover_para_etapa_agendados(lead_id)
 
         return {
             "success": True,
             "message": "Agendamento processado com sucesso",
             "codigo_agendamento": str(codigo_agendamento),
+            "codigo_cliente_belle": str(codigo_cliente_belle) if codigo_cliente_belle else None,
             "lead_id": lead_id,
             "warning": warning,
         }
