@@ -718,6 +718,199 @@ Servicos: {procedimento}
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.api_route("/agendamentos/add/", methods=["GET", "POST"])
+async def agendamentos_add_legacy(
+    request: Request,
+    ID: str = Query(None, description="ID do lead/negócio"),
+    dtAgd: str = Query("", description="Data dd/mm/yyyy"),
+    codEstab: str = Query("", description="Código do estabelecimento Belle"),
+    nomeProf: str = Query("", description="Nome do profissional"),
+    codProf: str = Query("", description="Código do profissional"),
+    id_prof: str = Query("", description="ID do profissional"),
+    codCli: str = Query("", description="Código do cliente Belle"),
+    hri: str = Query("", description="Horário HH:MM"),
+    entidade: str = Query("lead", description="Tipo de entidade (lead/deal)"),
+    vendedor: str = Query("", description="Email do vendedor"),
+    tipo_agendamento: str = Query("", description="Tipo de agendamento"),
+    equipamento: str = Query("", description="Código do equipamento"),
+    contatoId: str = Query("", description="ID do contato"),
+    contatoCPF: str = Query("", description="CPF do contato"),
+    contatoName: str = Query("", description="Nome do contato"),
+    tempo: str = Query("15", description="Tempo em minutos"),
+    novo_card: str = Query("", description="Flag novo card"),
+    pipe: str = Query("", description="Category/Pipeline ID"),
+    responsavel: str = Query("", description="Responsável"),
+    id_item_estab: str = Query("", description="ID item estabelecimento"),
+):
+    """
+    Endpoint legado compatível com o workflow antigo.
+    Recebe parâmetros no formato do servidor 187.60.56.72:25256
+    """
+    # Captura todos os parâmetros da query string para serviços
+    query_params = dict(request.query_params)
+
+    # Extrai serviços dos parâmetros (podem vir como serv[0], serv[1], etc)
+    servicos = []
+    for key, value in query_params.items():
+        if key.startswith("serv[") or key.startswith("serv%5B"):
+            servicos.append(value)
+
+    # Se não encontrou array, tenta parâmetro único
+    if not servicos and query_params.get("serv"):
+        servicos = [query_params.get("serv")]
+
+    logger.info(
+        "agendamentos_add_legacy",
+        ID=ID,
+        dtAgd=dtAgd,
+        codEstab=codEstab,
+        codProf=codProf,
+        codCli=codCli,
+        hri=hri,
+        contatoCPF=contatoCPF,
+        contatoName=contatoName,
+        servicos=servicos,
+    )
+
+    # Validação básica
+    if not dtAgd or not hri:
+        return {
+            "success": False,
+            "error": "Data (dtAgd) e horário (hri) são obrigatórios",
+        }
+
+    try:
+        # 1. Converte estabelecimento se necessário
+        estab_belle = int(codEstab) if codEstab else None
+        if not estab_belle and id_item_estab:
+            estab_bitrix = int(id_item_estab)
+            estab_belle = converter_estabelecimento_para_belle(estab_bitrix)
+
+        if not estab_belle:
+            return {"success": False, "error": "Código do estabelecimento não informado"}
+
+        logger.info("estabelecimento_convertido", estab_belle=estab_belle)
+
+        # 2. Verifica/cria cliente Belle
+        codigo_cliente = codCli if codCli else None
+
+        # Se não tem código do cliente mas tem CPF, tenta criar
+        if not codigo_cliente and contatoCPF:
+            cpf_limpo = "".join(c for c in contatoCPF if c.isdigit())
+            if cpf_limpo:
+                logger.info("criando_cliente_com_cpf", cpf=cpf_limpo, nome=contatoName)
+                try:
+                    cliente_response = criar_cliente_belle(
+                        nome=contatoName or "Cliente",
+                        telefone="",
+                        codEstab=estab_belle,
+                        cpf=cpf_limpo
+                    )
+                    codigo_cliente = (
+                        cliente_response.get("codCliente") or
+                        cliente_response.get("codigo") or
+                        cliente_response.get("cod_cliente") or
+                        cliente_response.get("id")
+                    )
+                    if codigo_cliente:
+                        logger.info("cliente_criado_com_cpf", codigo=codigo_cliente)
+                except Exception as e:
+                    logger.error("erro_criar_cliente_cpf", error=str(e))
+
+        # 3. Prepara profissional
+        cod_profissional = codProf or id_prof or ""
+
+        # 4. Cria o agendamento na Belle
+        logger.info(
+            "criando_agendamento_legacy",
+            codigo_cliente=codigo_cliente,
+            estab=estab_belle,
+            prof=cod_profissional,
+            data=dtAgd,
+            hora=hri,
+            servicos=servicos,
+        )
+
+        # Monta array de serviços
+        serv_array = []
+        for serv in servicos:
+            if serv:
+                serv_array.append({
+                    "codServico": str(serv),
+                    "nomeServico": str(serv),
+                })
+
+        # Payload no formato da API Belle
+        belle_payload = {
+            "codCli": int(codigo_cliente) if codigo_cliente else None,
+            "codEstab": estab_belle,
+            "prof": {
+                "cod_usuario": str(cod_profissional) if cod_profissional else "",
+                "nom_usuario": nomeProf or "",
+            },
+            "dtAgd": dtAgd,
+            "hri": hri,
+            "serv": serv_array,
+            "codPlano": "",
+            "agSala": False,
+            "codSala": 0,
+            "codVendedor": vendedor or "",
+            "codEquipamento": int(equipamento) if equipamento and equipamento.isdigit() else None,
+            "obs": f"Entidade: {entidade}, Pipeline: {pipe}" if pipe else "",
+        }
+
+        logger.info("payload_belle", payload=belle_payload)
+
+        belle_response = belle_call("/api/release/controller/IntegracaoExterna/v1.0/agenda/gravar", belle_payload)
+
+        codigo_agendamento = (
+            belle_response.get("codAgendamento") or
+            belle_response.get("codigo_agendamento") or
+            belle_response.get("codigo") or
+            belle_response.get("id") or
+            "CRIADO"
+        )
+
+        logger.info("agendamento_criado_legacy", codigo=codigo_agendamento)
+
+        # 5. Atualiza entidade no Bitrix (se for lead)
+        if ID and entidade == "lead":
+            try:
+                campos_atualizar = {
+                    FIELD_CODIGO_AGENDAMENTO: str(codigo_agendamento),
+                    FIELD_DATA_AGENDAMENTO: f"{dtAgd} {hri}:00",
+                }
+                if codigo_cliente:
+                    campos_atualizar[FIELD_CODIGO_CLIENTE_BELLE] = str(codigo_cliente)
+
+                atualizar_lead(int(ID), campos_atualizar)
+                adicionar_comentario_lead(
+                    int(ID),
+                    f"✅ Agendamento criado via workflow legado\n\nCódigo: {codigo_agendamento}\nCliente Belle: {codigo_cliente or 'N/A'}\nData: {dtAgd} {hri}"
+                )
+            except Exception as e:
+                logger.warning("erro_atualizar_lead_legacy", error=str(e))
+
+        return {
+            "success": True,
+            "message": "Agendamento criado com sucesso",
+            "codigo_agendamento": str(codigo_agendamento),
+            "codigo_cliente": str(codigo_cliente) if codigo_cliente else None,
+            "belle_response": belle_response,
+        }
+
+    except httpx.HTTPError as e:
+        logger.error("erro_http_legacy", error=str(e))
+        error_detail = str(e)
+        if hasattr(e, 'response') and e.response is not None:
+            error_detail = f"{str(e)} - {e.response.text}"
+        return {"success": False, "error": error_detail}
+
+    except Exception as e:
+        logger.error("erro_agendamento_legacy", error=str(e))
+        return {"success": False, "error": str(e)}
+
+
 @app.post("/webhook/bitrix")
 async def webhook_bitrix_raw(request: Request):
     """
