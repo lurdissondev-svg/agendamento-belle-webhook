@@ -647,6 +647,7 @@ class AgendamentoRequest(BaseModel):
     equipamento_nome: str | None = None
     novo_card: bool = False
     observacao: str = ""
+    agendador: str | None = None  # ID do usuário que executou o workflow
 
 
 class AgendamentoResponse(BaseModel):
@@ -1290,7 +1291,7 @@ def converter_lead_para_negocio(lead_id: int, codigo_agendamento: str = None, da
                     # Tenta parsear formato "dd/mm/yyyy HH:MM:SS"
                     dt = datetime.strptime(data_str, "%d/%m/%Y %H:%M:%S")
                     # Converte para ISO format com timezone de Brasília que o Bitrix aceita
-                    data_iso = dt.strftime("%Y-%m-%dT%H:%M:%S-03:00")
+                    data_iso = dt.strftime("%Y-%m-%dT%H:%M:%S-04:00")
                     deal_fields[DEAL_FIELD_DATA_AGENDAMENTO] = data_iso
                     logger.info("data_agendamento_convertida", original=data_str, iso=data_iso)
                 except ValueError:
@@ -1383,6 +1384,14 @@ def converter_lead_para_negocio(lead_id: int, codigo_agendamento: str = None, da
                     deal_fields[DEAL_FIELD_SEGMENTO] = segmento_bitrix
                 else:
                     logger.warning("segmento_usando_valor_original", valor=segmento_belle)
+
+            # Procedimento (ativo) do Lead - copiar diretamente
+            # O campo iblock_element pode ter o mesmo ID ou precisar mapeamento
+            if dados_agendamento.get("procedimento_lead"):
+                procedimento_lead = dados_agendamento["procedimento_lead"]
+                # Primeiro tenta usar o valor diretamente (mesmo iblock)
+                deal_fields[DEAL_FIELD_PROCEDIMENTO] = procedimento_lead
+                logger.info("procedimento_lead_copiado", valor=procedimento_lead)
 
             logger.info(
                 "campos_extras_adicionados_ao_deal",
@@ -1559,7 +1568,7 @@ async def processar_agendamento_json(request: Request, dados: AgendamentoRequest
         # Converte para formato ISO com timezone de Brasília para o Bitrix aceitar
         try:
             dt = datetime.strptime(data_formatada, "%d/%m/%Y %H:%M:%S")
-            data_iso = dt.strftime("%Y-%m-%dT%H:%M:%S-03:00")
+            data_iso = dt.strftime("%Y-%m-%dT%H:%M:%S-04:00")
         except ValueError:
             # Se falhar, usa formato original
             data_iso = data_formatada
@@ -1576,6 +1585,9 @@ async def processar_agendamento_json(request: Request, dados: AgendamentoRequest
 
         if dados.equipamento_nome:
             campos_atualizar[FIELD_EQUIPAMENTO] = dados.equipamento_nome
+
+        if dados.agendador:
+            campos_atualizar[LEAD_FIELD_AGENDADOR] = dados.agendador
 
         atualizar_lead(dados.lead_id, campos_atualizar)
         logger.info("lead_atualizado", lead_id=dados.lead_id)
@@ -1612,6 +1624,10 @@ async def processar_agendamento_json(request: Request, dados: AgendamentoRequest
             "codigo_cliente_belle": dados.codigo_cliente_belle,
         }
 
+        # Agendador (quem executou o workflow)
+        if dados.agendador:
+            dados_extras["agendador"] = dados.agendador
+
         # Busca campos do lead original (origem, campanha, etc.) para copiar para o deal
         try:
             lead_response = bitrix_call("crm.lead.get", {"id": dados.lead_id})
@@ -1643,12 +1659,18 @@ async def processar_agendamento_json(request: Request, dados: AgendamentoRequest
                 if segmento:
                     dados_extras["segmento"] = segmento
 
+                # Procedimento (ativo) do Lead - para copiar para o Deal
+                procedimento_lead = lead_info.get(LEAD_FIELD_PROCEDIMENTO)
+                if procedimento_lead:
+                    dados_extras["procedimento_lead"] = procedimento_lead
+
                 logger.info(
                     "campos_lead_para_deal_json",
                     lead_id=dados.lead_id,
                     origem=origem,
                     campanha=campanha,
-                    tipo_paciente=tipo_paciente
+                    tipo_paciente=tipo_paciente,
+                    procedimento=procedimento_lead
                 )
         except Exception as e:
             logger.warning("erro_buscar_campos_lead", lead_id=dados.lead_id, error=str(e))
@@ -1986,7 +2008,7 @@ async def processar_agendamento_get(
         # Converte para formato ISO com timezone de Brasília para o Bitrix aceitar
         try:
             dt = datetime.strptime(data_formatada, "%d/%m/%Y %H:%M:%S")
-            data_iso = dt.strftime("%Y-%m-%dT%H:%M:%S-03:00")
+            data_iso = dt.strftime("%Y-%m-%dT%H:%M:%S-04:00")
         except ValueError:
             # Se falhar, usa formato original
             data_iso = data_formatada
@@ -2082,6 +2104,11 @@ async def processar_agendamento_get(
             if segmento:
                 dados_extras["segmento"] = segmento
 
+            # Procedimento (ativo) do Lead - para copiar para o Deal
+            procedimento_lead = lead_info.get(LEAD_FIELD_PROCEDIMENTO)
+            if procedimento_lead:
+                dados_extras["procedimento_lead"] = procedimento_lead
+
             logger.info(
                 "campos_lead_para_deal",
                 lead_id=lead_id,
@@ -2089,7 +2116,8 @@ async def processar_agendamento_get(
                 campanha=campanha,
                 tipo_paciente=tipo_paciente,
                 agendador=agendador,
-                segmento=segmento
+                segmento=segmento,
+                procedimento=procedimento_lead
             )
 
         # Tipo de Atendimento - pode vir do parâmetro do workflow ou do lead
