@@ -194,11 +194,35 @@ FIELD_TIPO_CONSULTA = LEAD_FIELD_TIPO_ATENDIMENTO
 FIELD_EQUIPAMENTO = LEAD_FIELD_EQUIPAMENTO  # string - Equipamento
 FIELD_CODIGO_CLIENTE_BELLE = LEAD_FIELD_CODIGO_CLIENTE_BELLE
 
-# Configuração para conversão de Lead em Negócio
-# Pipeline: "Negócios - Clinica SPA" (ID 42)
-# Etapa: "Agendados" (C42:UC_12PH7E)
-DEAL_CATEGORY_ID = 42
-DEAL_STAGE_AGENDADOS = "C42:UC_12PH7E"
+# ==========================================
+# MAPEAMENTO DE ESTABELECIMENTOS -> PIPELINES
+# ==========================================
+# Cada estabelecimento pertence a um pipeline específico
+# Mapeamento: código Belle do estabelecimento -> (CATEGORY_ID, STAGE_ID)
+
+# Pipelines disponíveis:
+# 42: Negócios - Clinica SPA
+# 48: Negócios - Convenios
+# 50: Negócios - Bela Laser
+# 54: Negócios - Nutrologia
+
+ESTABELECIMENTO_TO_PIPELINE = {
+    # Clinica SPA (DRIPS, SPA, DERMATO, ESTETICA)
+    "1": (42, "C42:UC_12PH7E"),    # CLINICA CREPALDI DERMATO
+    "2": (42, "C42:UC_12PH7E"),    # SPA CREPALDI
+    "10": (42, "C42:UC_12PH7E"),   # DRIPS CLINIC
+    "11": (42, "C42:UC_12PH7E"),   # CREPALDI CLINICA DE ESTETICA LTDA
+    # Convenios
+    "5": (48, "C48:UC_7TGHGJ"),    # CLINICA DERMATO E CONVENIOS LTDA
+    # Bela Laser
+    "12": (50, "C50:UC_KEJS7X"),   # ESPAÇO BELA LASER
+    # Nutrologia
+    "14": (54, "C54:NEW"),         # KLAYNE MOURA SERVIÇOS MEDICOS LTDA
+}
+
+# Pipeline padrão caso o estabelecimento não esteja mapeado
+DEAL_CATEGORY_ID_DEFAULT = 42
+DEAL_STAGE_DEFAULT = "C42:UC_12PH7E"
 
 # ==========================================
 # MAPEAMENTO DE IDs DE ENUMERAÇÃO LEAD -> DEAL
@@ -407,6 +431,44 @@ def converter_belle_para_bitrix_estabelecimento(codigo_belle: str) -> int | None
     else:
         logger.warning("estabelecimento_sem_mapeamento_belle_bitrix", codigo_belle=codigo_str)
     return bitrix_id
+
+
+def obter_pipeline_por_estabelecimento(codigo_estabelecimento: str) -> tuple[int, str]:
+    """
+    Obtém o pipeline (CATEGORY_ID) e estágio (STAGE_ID) baseado no estabelecimento.
+
+    Mapeamento:
+    - Clinica SPA (42): DRIPS, SPA, DERMATO, ESTETICA (códigos 1, 2, 10, 11)
+    - Convenios (48): Convenios (código 5)
+    - Bela Laser (50): Bela Laser (código 12)
+    - Nutrologia (54): Klayne Moura (código 14)
+
+    Args:
+        codigo_estabelecimento: Código Belle do estabelecimento
+
+    Returns:
+        Tupla (CATEGORY_ID, STAGE_ID) do pipeline correspondente
+    """
+    codigo_str = str(codigo_estabelecimento).strip()
+    pipeline_info = ESTABELECIMENTO_TO_PIPELINE.get(codigo_str)
+
+    if pipeline_info:
+        category_id, stage_id = pipeline_info
+        logger.info(
+            "pipeline_selecionado_por_estabelecimento",
+            estabelecimento=codigo_str,
+            category_id=category_id,
+            stage_id=stage_id
+        )
+        return pipeline_info
+    else:
+        logger.warning(
+            "estabelecimento_sem_pipeline_mapeado_usando_padrao",
+            estabelecimento=codigo_str,
+            category_id_padrao=DEAL_CATEGORY_ID_DEFAULT,
+            stage_id_padrao=DEAL_STAGE_DEFAULT
+        )
+        return (DEAL_CATEGORY_ID_DEFAULT, DEAL_STAGE_DEFAULT)
 
 
 def converter_belle_para_bitrix_segmento(codigo_belle: str) -> int | None:
@@ -1188,11 +1250,18 @@ def converter_lead_para_negocio(lead_id: int, codigo_agendamento: str = None, da
         if lead_data:
             titulo = lead_data.get("TITLE") or lead_data.get("NAME") or titulo
 
+        # Determina o pipeline baseado no estabelecimento
+        estabelecimento_codigo = None
+        if dados_agendamento and dados_agendamento.get("estabelecimento"):
+            estabelecimento_codigo = str(dados_agendamento["estabelecimento"])
+
+        category_id, stage_id = obter_pipeline_por_estabelecimento(estabelecimento_codigo)
+
         # Cria o negócio usando crm.deal.add
         deal_fields = {
             "TITLE": titulo,
-            "CATEGORY_ID": DEAL_CATEGORY_ID,
-            "STAGE_ID": DEAL_STAGE_AGENDADOS,
+            "CATEGORY_ID": category_id,
+            "STAGE_ID": stage_id,
             "LEAD_ID": lead_id,
         }
 
